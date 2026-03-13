@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Codex.Subagent do
   @moduledoc """
-  Spawns CLI sub-agents (Claude Code, GitHub Copilot, Codex) as subprocesses
+  Spawns CLI sub-agents (Claude Code, Gemini CLI, Codex) as subprocesses
   and collects their output.
   """
 
@@ -35,10 +35,10 @@ defmodule SymphonyElixir.Codex.Subagent do
     run("claude --print -p \"$(cat)\"", task, workspace, opts)
   end
 
-  @spec run_copilot(String.t(), Path.t(), keyword()) ::
+  @spec run_gemini(String.t(), Path.t(), keyword()) ::
           {:ok, %{output: String.t(), exit_code: integer()}} | {:error, term()}
-  def run_copilot(task, workspace, opts \\ []) do
-    run("copilot", task, workspace, opts)
+  def run_gemini(task, workspace, opts \\ []) do
+    run("gemini -p \"$(cat)\"", task, workspace, opts)
   end
 
   @spec run_codex(String.t(), Path.t(), keyword()) ::

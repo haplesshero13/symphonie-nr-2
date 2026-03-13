@@ -35,8 +35,8 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       "spawn_claude" ->
         execute_spawn_agent(:claude, arguments, opts)
 
-      "spawn_copilot" ->
-        execute_spawn_agent(:copilot, arguments, opts)
+      "spawn_gemini" ->
+        execute_spawn_agent(:gemini, arguments, opts)
 
       "spawn_codex" ->
         execute_spawn_agent(:codex, arguments, opts)
@@ -85,8 +85,8 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         }
       },
       %{
-        "name" => "spawn_copilot",
-        "description" => "Launch GitHub Copilot CLI on a subtask. Best for code generation, PRs, and fleet tasks.",
+        "name" => "spawn_gemini",
+        "description" => "Launch Gemini CLI on a subtask. Best for code generation, large-context analysis, and general-purpose tasks.",
         "inputSchema" => %{
           "type" => "object",
           "additionalProperties" => false,
@@ -94,7 +94,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
           "properties" => %{
             "task" => %{
               "type" => "string",
-              "description" => "The task description to send to GitHub Copilot CLI."
+              "description" => "The task description to send to Gemini CLI."
             },
             "workspace_subdir" => %{
               "type" => "string",
@@ -166,7 +166,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         result =
           case provider do
             :claude -> Subagent.run_claude(task, workspace)
-            :copilot -> Subagent.run_copilot(task, workspace)
+            :gemini -> Subagent.run_gemini(task, workspace)
             :codex -> Subagent.run_codex(task, workspace)
           end
 
@@ -211,12 +211,12 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       end
 
     claude_available = System.find_executable("claude") != nil
-    copilot_available = System.find_executable("copilot") != nil
+    gemini_available = System.find_executable("gemini") != nil
 
     payload = %{
       "openrouter" => openrouter_status,
       "claude" => %{"available" => claude_available},
-      "copilot" => %{"available" => copilot_available},
+      "gemini" => %{"available" => gemini_available},
       "codex" => %{"available" => true}
     }
 

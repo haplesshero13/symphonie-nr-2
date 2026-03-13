@@ -28,7 +28,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     names = Enum.map(specs, & &1["name"])
 
     assert "spawn_claude" in names
-    assert "spawn_copilot" in names
+    assert "spawn_gemini" in names
     assert "spawn_codex" in names
     assert "openrouter_complete" in names
     assert "check_quotas" in names
