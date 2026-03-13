@@ -1,39 +1,42 @@
 ---
 tracker:
   kind: linear
-  project_slug: "symphony-0c79b11b75ea"
+  project_slug: "game-bot-853370bd6501"
+  api_key: $LINEAR_API_KEY
   active_states:
     - Todo
     - In Progress
-    - Merging
+    - Human Review
     - Rework
   terminal_states:
-    - Closed
-    - Cancelled
-    - Canceled
-    - Duplicate
     - Done
 polling:
   interval_ms: 5000
 workspace:
-  root: ~/code/symphony-workspaces
+  root: ~/Development/workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/openai/symphony .
+    git clone --depth 1 git@github.com:haplesshero13/game-bot-rs.git .
     if command -v mise >/dev/null 2>&1; then
-      cd elixir && mise trust && mise exec -- mix deps.get
+      mise trust
+      mise install
+      mise exec -- cargo fetch
+    elif command -v cargo >/dev/null 2>&1; then
+      cargo fetch
     fi
-  before_remove: |
-    cd elixir && mise exec -- mix workspace.before_remove
+server:
+  host: 0.0.0.0
+  port: 4000
+
 agent:
-  max_concurrent_agents: 10
+  max_concurrent_agents: 5
   max_turns: 20
 codex:
-  command: codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh --model gpt-5.3-codex app-server
+  command: codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh --model gpt-5.4 app-server
   approval_policy: never
-  thread_sandbox: workspace-write
+  thread_sandbox: danger-full-access
   turn_sandbox_policy:
-    type: workspaceWrite
+    type: dangerFullAccess
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`
@@ -93,13 +96,22 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - Operate autonomously end-to-end unless blocked by missing requirements, secrets, or permissions.
 - Use the blocked-access escape hatch only for true external blockers (missing required tools/auth) after exhausting documented fallbacks.
 
+## How Symphony uses git
+
+- Symphony creates one per-issue workspace under the configured workspace root and runs you inside that repository copy.
+- The normal lifecycle is: inspect current repo state, sync with latest `origin/main`, create or continue an issue branch, implement, validate, commit, push, open/update the PR, then wait in `Human Review`.
+- Retries usually reuse the same workspace and branch state. Resume from what is already there unless the workflow explicitly tells you to start fresh.
+- If the branch PR is already `CLOSED` or `MERGED`, treat that branch state as non-reusable. Create a fresh branch from `origin/main` and restart from reproduction/planning.
+- Git operations are part of the expected deliverable, not optional polish. Unless blocked by the environment, you should expect to do real branch, commit, push, and PR work before handoff.
+- Distinguish repository-state problems from sandbox/permission problems. Errors such as `cannot open .git/FETCH_HEAD: Operation not permitted`, `cannot lock ref ... .lock: Operation not permitted`, or `could not create .git/index.lock` mean the environment cannot write under `.git`; treat that as an environment blocker, not as a merge/conflict condition.
+- If read-only git inspection works but writes under `.git` are blocked, continue implementation and validation in the current workspace when possible, but record that branch creation, fetch/pull, commit, push, and PR creation are blocked handoff tasks.
+
 ## Related skills
 
 - `linear`: interact with Linear.
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
-- `land`: when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
 
 ## Status map
 
@@ -107,8 +119,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
   - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
 - `In Progress` -> implementation actively underway.
-- `Human Review` -> PR is attached and validated; waiting on human approval.
-- `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
+- `Human Review` -> branch is pushed, PR is open, validation/checks are complete, and the work is ready for a human to review and either merge or send back to `Rework`.
 - `Rework` -> reviewer requested changes; planning + implementation required.
 - `Done` -> terminal state; no further action required.
 
@@ -121,8 +132,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
-   - `Human Review` -> wait and poll for decision/review updates.
-   - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
+   - `Human Review` -> wait for the human to review the PR and either merge it or move the issue to `Rework`.
    - `Rework` -> run rework flow.
    - `Done` -> do nothing and shut down.
 4. Check whether a PR already exists for the current branch and whether it is closed.
@@ -163,6 +173,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
       - merge source(s),
       - result (`clean` or `conflicts resolved`),
       - resulting `HEAD` short SHA.
+    - If the `pull` skill is unavailable or any git sync command fails with a permissions error while writing under `.git`, record the exact command and error in the workpad as an environment blocker.
 10. Compact context and proceed to execution.
 
 ## PR feedback sweep protocol (required)
@@ -187,6 +198,7 @@ Use this only when completion is blocked by missing required tools or missing au
 
 - GitHub is **not** a valid blocker by default. Always try fallback strategies first (alternate remote/auth mode, then continue publish/review flow).
 - Do not move to `Human Review` for GitHub access/auth until all fallback strategies have been attempted and documented in the workpad.
+- Sandbox restrictions that prevent writes under `.git` are a valid blocker once confirmed by at least one concrete failing command (for example `git fetch` failing to write `FETCH_HEAD`, `git switch -c` failing to create `refs/...lock`, or `git commit` failing to create `index.lock`).
 - If a non-GitHub required tool is missing, or required non-GitHub auth is unavailable, move the ticket to `Human Review` with a short blocker brief in the workpad that includes:
   - what is missing,
   - why it blocks required acceptance/validation,
@@ -232,20 +244,20 @@ Use this only when completion is blocked by missing required tools or missing au
     - Repeat this check-address-verify loop until no outstanding comments remain and checks are fully passing.
     - Re-open and refresh the workpad before state transition so `Plan`, `Acceptance Criteria`, and `Validation` exactly match completed work.
 12. Only then move issue to `Human Review`.
+    - `Human Review` is only valid when there is an actual reviewable PR for the human. Do not use `Human Review` for "local work complete but not published yet."
     - Exception: if blocked by missing required non-GitHub tools/auth per the blocked-access escape hatch, move to `Human Review` with the blocker brief and explicit unblock actions.
 13. For `Todo` tickets that already had a PR attached at kickoff:
     - Ensure all existing PR feedback was reviewed and resolved, including inline review comments (code changes or explicit, justified pushback response).
     - Ensure branch was pushed with any required updates.
     - Then move to `Human Review`.
 
-## Step 3: Human Review and merge handling
+## Step 3: Human Review handling
 
 1. When the issue is in `Human Review`, do not code or change ticket content.
-2. Poll for updates as needed, including GitHub PR review comments from humans and bots.
-3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
-4. If approved, human moves the issue to `Merging`.
-5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
-6. After merge is complete, move the issue to `Done`.
+2. `Human Review` means the human should now look at the PR.
+3. If the human wants changes, they move the issue to `Rework` and you follow the rework flow.
+4. If the human accepts the work, they merge the PR.
+5. After the PR is merged, move the issue to `Done`.
 
 ## Step 4: Rework handling
 
@@ -265,7 +277,7 @@ Use this only when completion is blocked by missing required tools or missing au
 - Acceptance criteria and required ticket-provided validation items are complete.
 - Validation/tests are green for the latest commit.
 - PR feedback sweep is complete and no actionable comments remain.
-- PR checks are green, branch is pushed, and PR is linked on the issue.
+- PR checks are green, branch is pushed, PR is linked on the issue, and the PR is reviewable by a human without additional Codex publishing work.
 - Required PR metadata is present (`symphony` label).
 - If app-touching, runtime validation/media requirements from `App runtime validation (required)` are complete.
 
