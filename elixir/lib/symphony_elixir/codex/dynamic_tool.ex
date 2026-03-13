@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
-  alias SymphonyElixir.{Codex.Subagent, Linear.Client, OpenRouter}
+  alias SymphonyElixir.{Codex.Subagent, Linear.Client, OpenRouter, PathSafety}
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
@@ -155,45 +155,58 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   defp execute_spawn_agent(provider, arguments, opts) do
     task = get_string_arg(arguments, "task")
-    workspace = resolve_workspace(arguments, opts)
 
     if is_nil(task) or String.trim(task) == "" do
       failure_response(%{"error" => %{"message" => "spawn_#{provider} requires a non-empty `task` string."}})
     else
-      if is_nil(workspace) do
-        failure_response(%{"error" => %{"message" => "No workspace available for sub-agent execution."}})
+      with {:ok, workspace} <- resolve_workspace(arguments, opts) do
+        run_subagent(provider, task, workspace, opts)
       else
-        result =
-          case provider do
-            :claude -> Subagent.run_claude(task, workspace)
-            :gemini -> Subagent.run_gemini(task, workspace)
-            :codex -> Subagent.run_codex(task, workspace)
-          end
+        {:error, :no_workspace} ->
+          failure_response(%{"error" => %{"message" => "No workspace available for sub-agent execution."}})
 
-        case result do
-          {:ok, %{output: output, exit_code: 0}} ->
-            success_response(output)
-
-          {:ok, %{output: output, exit_code: code}} ->
-            dynamic_tool_response(false, "Sub-agent exited with code #{code}.\n\n#{output}")
-
-          {:error, reason} ->
-            failure_response(%{"error" => %{"message" => "Sub-agent failed: #{inspect(reason)}"}})
-        end
+        {:error, reason} ->
+          failure_response(%{"error" => %{"message" => "Invalid workspace_subdir: #{inspect(reason)}."}})
       end
     end
   end
 
-  defp execute_openrouter_complete(arguments, _opts) do
+  defp run_subagent(provider, task, workspace, opts) do
+    subagent_runner = Keyword.get(opts, :subagent_runner, &default_subagent_runner/3)
+
+    case subagent_runner.(provider, task, workspace) do
+      {:ok, %{output: output, exit_code: 0}} ->
+        success_response(output)
+
+      {:ok, %{output: output, exit_code: code}} ->
+        failure_response(%{
+          "error" => %{
+            "message" => "Sub-agent exited with code #{code}.",
+            "exit_code" => code,
+            "output" => output
+          }
+        })
+
+      {:error, reason} ->
+        failure_response(%{"error" => %{"message" => "Sub-agent failed: #{inspect(reason)}"}})
+    end
+  end
+
+  defp default_subagent_runner(:claude, task, workspace), do: Subagent.run_claude(task, workspace)
+  defp default_subagent_runner(:gemini, task, workspace), do: Subagent.run_gemini(task, workspace)
+  defp default_subagent_runner(:codex, task, workspace), do: Subagent.run_codex(task, workspace)
+
+  defp execute_openrouter_complete(arguments, opts) do
     prompt = get_string_arg(arguments, "prompt")
-    model = get_string_arg(arguments, "model")
+    model = arguments |> get_string_arg("model") |> trim_to_nil()
+    openrouter_client = Keyword.get(opts, :openrouter_client, &OpenRouter.complete/2)
 
     if is_nil(prompt) or String.trim(prompt) == "" do
       failure_response(%{"error" => %{"message" => "openrouter_complete requires a non-empty `prompt` string."}})
     else
       model_opts = if model, do: [model: model], else: []
 
-      case OpenRouter.complete(prompt, model_opts) do
+      case openrouter_client.(prompt, model_opts) do
         {:ok, content} ->
           success_response(content)
 
@@ -203,21 +216,24 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     end
   end
 
-  defp execute_check_quotas(_opts) do
+  defp execute_check_quotas(opts) do
+    openrouter_quota_checker = Keyword.get(opts, :openrouter_quota_checker, &OpenRouter.check_quota/0)
+
     openrouter_status =
-      case OpenRouter.check_quota() do
+      case openrouter_quota_checker.() do
         {:ok, data} -> %{"available" => true, "details" => data}
         {:error, reason} -> %{"available" => false, "error" => inspect(reason)}
       end
 
     claude_available = System.find_executable("claude") != nil
     gemini_available = System.find_executable("gemini") != nil
+    codex_available = System.find_executable("codex") != nil
 
     payload = %{
       "openrouter" => openrouter_status,
       "claude" => %{"available" => claude_available},
       "gemini" => %{"available" => gemini_available},
-      "codex" => %{"available" => true}
+      "codex" => %{"available" => codex_available}
     }
 
     success_response(encode_payload(payload))
@@ -228,9 +244,59 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     subdir = get_string_arg(arguments, "workspace_subdir")
 
     cond do
-      is_nil(base_workspace) -> nil
-      is_nil(subdir) or String.trim(subdir) == "" -> base_workspace
-      true -> Path.join(base_workspace, subdir)
+      is_nil(base_workspace) ->
+        {:error, :no_workspace}
+
+      is_nil(subdir) or String.trim(subdir) == "" ->
+        {:ok, base_workspace}
+
+      true ->
+        validate_workspace_subdir(base_workspace, subdir)
+    end
+  end
+
+  defp validate_workspace_subdir(base_workspace, subdir) do
+    if Path.type(subdir) == :absolute do
+      {:error, :absolute_subdir_not_allowed}
+    else
+      check_subdir_within_workspace(base_workspace, subdir)
+    end
+  end
+
+  defp check_subdir_within_workspace(base_workspace, subdir) do
+    resolved_path = Path.join(base_workspace, subdir)
+    expanded_base = Path.expand(base_workspace)
+    base_prefix = expanded_base <> "/"
+
+    with {:ok, canonical_base} <- PathSafety.canonicalize(expanded_base),
+         {:ok, canonical_resolved} <- PathSafety.canonicalize(Path.expand(resolved_path)) do
+      canonical_base_prefix = canonical_base <> "/"
+
+      cond do
+        canonical_resolved == canonical_base ->
+          {:error, :resolves_to_workspace_root}
+
+        String.starts_with?(canonical_resolved <> "/", canonical_base_prefix) ->
+          {:ok, canonical_resolved}
+
+        String.starts_with?(Path.expand(resolved_path) <> "/", base_prefix) ->
+          {:error, :symlink_escape}
+
+        true ->
+          {:error, :outside_workspace}
+      end
+    else
+      {:error, {:path_canonicalize_failed, _path, reason}} ->
+        {:error, {:path_unreadable, reason}}
+    end
+  end
+
+  defp trim_to_nil(nil), do: nil
+
+  defp trim_to_nil(str) when is_binary(str) do
+    case String.trim(str) do
+      "" -> nil
+      trimmed -> trimmed
     end
   end
 

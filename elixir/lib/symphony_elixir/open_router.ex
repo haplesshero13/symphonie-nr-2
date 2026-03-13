@@ -22,7 +22,8 @@ defmodule SymphonyElixir.OpenRouter do
 
         case Req.post("#{@base_url}/chat/completions",
                json: body,
-               headers: [{"authorization", "Bearer #{key}"}],
+               headers: [{"Authorization", "Bearer #{key}"}],
+               connect_options: [timeout: 30_000],
                receive_timeout: 120_000
              ) do
           {:ok, %{status: 200, body: %{"choices" => [%{"message" => %{"content" => content}} | _]}}} ->
@@ -45,7 +46,8 @@ defmodule SymphonyElixir.OpenRouter do
 
       key ->
         case Req.get("#{@base_url}/auth/key",
-               headers: [{"authorization", "Bearer #{key}"}],
+               headers: [{"Authorization", "Bearer #{key}"}],
+               connect_options: [timeout: 30_000],
                receive_timeout: 10_000
              ) do
           {:ok, %{status: 200, body: body}} when is_map(body) ->

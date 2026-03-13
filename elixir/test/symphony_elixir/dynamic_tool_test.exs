@@ -308,7 +308,242 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
            }
   end
 
-  test "linear_graphql falls back to inspect for non-JSON payloads" do
+  test "spawn_claude succeeds and returns sub-agent output" do
+    response =
+      DynamicTool.execute(
+        "spawn_claude",
+        %{"task" => "summarise this repo"},
+        workspace: "/tmp/test-workspace",
+        subagent_runner: fn :claude, task, workspace ->
+          assert task == "summarise this repo"
+          assert workspace == "/tmp/test-workspace"
+          {:ok, %{output: "Summary complete.", exit_code: 0}}
+        end
+      )
+
+    assert response["success"] == true
+    assert response["output"] == "Summary complete."
+  end
+
+  test "spawn_gemini succeeds and returns sub-agent output" do
+    response =
+      DynamicTool.execute(
+        "spawn_gemini",
+        %{"task" => "write tests"},
+        workspace: "/tmp/test-workspace",
+        subagent_runner: fn :gemini, _task, _workspace ->
+          {:ok, %{output: "Tests written.", exit_code: 0}}
+        end
+      )
+
+    assert response["success"] == true
+    assert response["output"] == "Tests written."
+  end
+
+  test "spawn_codex succeeds and returns sub-agent output" do
+    response =
+      DynamicTool.execute(
+        "spawn_codex",
+        %{"task" => "refactor auth module"},
+        workspace: "/tmp/test-workspace",
+        subagent_runner: fn :codex, _task, _workspace ->
+          {:ok, %{output: "Refactor done.", exit_code: 0}}
+        end
+      )
+
+    assert response["success"] == true
+    assert response["output"] == "Refactor done."
+  end
+
+  test "spawn_claude returns structured failure when sub-agent exits with non-zero code" do
+    response =
+      DynamicTool.execute(
+        "spawn_claude",
+        %{"task" => "do something"},
+        workspace: "/tmp/test-workspace",
+        subagent_runner: fn :claude, _task, _workspace ->
+          {:ok, %{output: "something went wrong", exit_code: 1}}
+        end
+      )
+
+    assert response["success"] == false
+
+    assert Jason.decode!(response["output"]) == %{
+             "error" => %{
+               "message" => "Sub-agent exited with code 1.",
+               "exit_code" => 1,
+               "output" => "something went wrong"
+             }
+           }
+  end
+
+  test "spawn_claude returns structured failure when sub-agent errors" do
+    response =
+      DynamicTool.execute(
+        "spawn_claude",
+        %{"task" => "do something"},
+        workspace: "/tmp/test-workspace",
+        subagent_runner: fn :claude, _task, _workspace ->
+          {:error, {:subagent_failed, "executable not found"}}
+        end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "Sub-agent failed"
+  end
+
+  test "spawn_claude rejects blank task" do
+    response =
+      DynamicTool.execute(
+        "spawn_claude",
+        %{"task" => "   "},
+        workspace: "/tmp/test-workspace",
+        subagent_runner: fn _provider, _task, _workspace ->
+          flunk("runner should not be called for blank task")
+        end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "non-empty"
+  end
+
+  test "spawn_claude fails when no workspace is available" do
+    response =
+      DynamicTool.execute(
+        "spawn_claude",
+        %{"task" => "do something"},
+        subagent_runner: fn _provider, _task, _workspace ->
+          flunk("runner should not be called when there is no workspace")
+        end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "No workspace available"
+  end
+
+  test "spawn_claude rejects workspace_subdir with path traversal" do
+    response =
+      DynamicTool.execute(
+        "spawn_claude",
+        %{"task" => "do something", "workspace_subdir" => "../../etc"},
+        workspace: System.tmp_dir!(),
+        subagent_runner: fn _provider, _task, _workspace ->
+          flunk("runner should not be called for traversal subdir")
+        end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "Invalid workspace_subdir"
+  end
+
+  test "spawn_claude rejects absolute workspace_subdir" do
+    response =
+      DynamicTool.execute(
+        "spawn_claude",
+        %{"task" => "do something", "workspace_subdir" => "/etc"},
+        workspace: System.tmp_dir!(),
+        subagent_runner: fn _provider, _task, _workspace ->
+          flunk("runner should not be called for absolute subdir")
+        end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "Invalid workspace_subdir"
+  end
+
+  test "openrouter_complete returns content on success" do
+    response =
+      DynamicTool.execute(
+        "openrouter_complete",
+        %{"prompt" => "hello"},
+        openrouter_client: fn "hello", [] -> {:ok, "World."} end
+      )
+
+    assert response["success"] == true
+    assert response["output"] == "World."
+  end
+
+  test "openrouter_complete passes model option when provided" do
+    response =
+      DynamicTool.execute(
+        "openrouter_complete",
+        %{"prompt" => "classify this", "model" => "openai/gpt-4o"},
+        openrouter_client: fn "classify this", [model: "openai/gpt-4o"] -> {:ok, "positive"} end
+      )
+
+    assert response["success"] == true
+    assert response["output"] == "positive"
+  end
+
+  test "openrouter_complete treats blank model as unset" do
+    response =
+      DynamicTool.execute(
+        "openrouter_complete",
+        %{"prompt" => "classify this", "model" => "   "},
+        openrouter_client: fn "classify this", [] -> {:ok, "neutral"} end
+      )
+
+    assert response["success"] == true
+    assert response["output"] == "neutral"
+  end
+
+  test "openrouter_complete returns failure on error" do
+    response =
+      DynamicTool.execute(
+        "openrouter_complete",
+        %{"prompt" => "hello"},
+        openrouter_client: fn _prompt, _opts -> {:error, :missing_openrouter_api_key} end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "OpenRouter completion failed"
+  end
+
+  test "openrouter_complete rejects blank prompt" do
+    response =
+      DynamicTool.execute(
+        "openrouter_complete",
+        %{"prompt" => ""},
+        openrouter_client: fn _prompt, _opts ->
+          flunk("client should not be called for blank prompt")
+        end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "non-empty"
+  end
+
+  test "check_quotas reports openrouter available and CLI availability" do
+    response =
+      DynamicTool.execute(
+        "check_quotas",
+        %{},
+        openrouter_quota_checker: fn -> {:ok, %{"limit" => 1000, "usage" => 100}} end
+      )
+
+    assert response["success"] == true
+    payload = Jason.decode!(response["output"])
+    assert payload["openrouter"]["available"] == true
+    assert payload["openrouter"]["details"] == %{"limit" => 1000, "usage" => 100}
+    assert is_boolean(payload["claude"]["available"])
+    assert is_boolean(payload["gemini"]["available"])
+    assert is_boolean(payload["codex"]["available"])
+  end
+
+  test "check_quotas reports openrouter unavailable on error" do
+    response =
+      DynamicTool.execute(
+        "check_quotas",
+        %{},
+        openrouter_quota_checker: fn -> {:error, :missing_openrouter_api_key} end
+      )
+
+    assert response["success"] == true
+    payload = Jason.decode!(response["output"])
+    assert payload["openrouter"]["available"] == false
+    assert payload["openrouter"]["error"] =~ "missing_openrouter_api_key"
+  end
+
     response =
       DynamicTool.execute(
         "linear_graphql",
