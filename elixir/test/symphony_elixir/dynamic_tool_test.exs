@@ -4,22 +4,34 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
   alias SymphonyElixir.Codex.DynamicTool
 
   test "tool_specs advertises the linear_graphql input contract" do
-    assert [
-             %{
-               "description" => description,
-               "inputSchema" => %{
-                 "properties" => %{
-                   "query" => _,
-                   "variables" => _
-                 },
-                 "required" => ["query"],
-                 "type" => "object"
+    specs = DynamicTool.tool_specs()
+    linear_spec = Enum.find(specs, &(&1["name"] == "linear_graphql"))
+
+    assert %{
+             "description" => description,
+             "inputSchema" => %{
+               "properties" => %{
+                 "query" => _,
+                 "variables" => _
                },
-               "name" => "linear_graphql"
-             }
-           ] = DynamicTool.tool_specs()
+               "required" => ["query"],
+               "type" => "object"
+             },
+             "name" => "linear_graphql"
+           } = linear_spec
 
     assert description =~ "Linear"
+  end
+
+  test "tool_specs includes sub-agent and openrouter tools" do
+    specs = DynamicTool.tool_specs()
+    names = Enum.map(specs, & &1["name"])
+
+    assert "spawn_claude" in names
+    assert "spawn_gemini" in names
+    assert "spawn_codex" in names
+    assert "openrouter_complete" in names
+    assert "check_quotas" in names
   end
 
   test "unsupported tools return a failure payload with the supported tool list" do
@@ -30,7 +42,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql"]
+               "supportedTools" => Enum.map(DynamicTool.tool_specs(), & &1["name"])
              }
            }
 
