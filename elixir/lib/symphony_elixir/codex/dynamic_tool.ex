@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.{Codex.Subagent, Linear.Client, OpenRouter}
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
@@ -32,6 +32,21 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
 
+      "spawn_claude" ->
+        execute_spawn_agent(:claude, arguments, opts)
+
+      "spawn_copilot" ->
+        execute_spawn_agent(:copilot, arguments, opts)
+
+      "spawn_codex" ->
+        execute_spawn_agent(:codex, arguments, opts)
+
+      "openrouter_complete" ->
+        execute_openrouter_complete(arguments, opts)
+
+      "check_quotas" ->
+        execute_check_quotas(opts)
+
       other ->
         failure_response(%{
           "error" => %{
@@ -49,8 +64,189 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
+      },
+      %{
+        "name" => "spawn_claude",
+        "description" => "Launch Claude Code CLI on a subtask. Best for research, web lookups, file analysis, and writing.",
+        "inputSchema" => %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => ["task"],
+          "properties" => %{
+            "task" => %{
+              "type" => "string",
+              "description" => "The task description to send to Claude Code."
+            },
+            "workspace_subdir" => %{
+              "type" => "string",
+              "description" => "Optional subdirectory within the workspace to run in."
+            }
+          }
+        }
+      },
+      %{
+        "name" => "spawn_copilot",
+        "description" => "Launch GitHub Copilot CLI on a subtask. Best for code generation, PRs, and fleet tasks.",
+        "inputSchema" => %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => ["task"],
+          "properties" => %{
+            "task" => %{
+              "type" => "string",
+              "description" => "The task description to send to GitHub Copilot CLI."
+            },
+            "workspace_subdir" => %{
+              "type" => "string",
+              "description" => "Optional subdirectory within the workspace to run in."
+            }
+          }
+        }
+      },
+      %{
+        "name" => "spawn_codex",
+        "description" => "Launch a sub-Codex session on a subtask. Best for focused coding tasks.",
+        "inputSchema" => %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => ["task"],
+          "properties" => %{
+            "task" => %{
+              "type" => "string",
+              "description" => "The task description to send to the sub-Codex session."
+            },
+            "workspace_subdir" => %{
+              "type" => "string",
+              "description" => "Optional subdirectory within the workspace to run in."
+            }
+          }
+        }
+      },
+      %{
+        "name" => "openrouter_complete",
+        "description" => "One-shot LLM call via OpenRouter. Cheap and fast, good for summaries, classification, and quick analysis.",
+        "inputSchema" => %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "required" => ["prompt"],
+          "properties" => %{
+            "prompt" => %{
+              "type" => "string",
+              "description" => "The prompt to send to the LLM."
+            },
+            "model" => %{
+              "type" => "string",
+              "description" => "OpenRouter model identifier. Defaults to anthropic/claude-3.5-sonnet."
+            }
+          }
+        }
+      },
+      %{
+        "name" => "check_quotas",
+        "description" => "Query provider availability before delegating work. Returns per-provider quota and availability status.",
+        "inputSchema" => %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "properties" => %{}
+        }
       }
     ]
+  end
+
+  defp execute_spawn_agent(provider, arguments, opts) do
+    task = get_string_arg(arguments, "task")
+    workspace = resolve_workspace(arguments, opts)
+
+    if is_nil(task) or String.trim(task) == "" do
+      failure_response(%{"error" => %{"message" => "spawn_#{provider} requires a non-empty `task` string."}})
+    else
+      if is_nil(workspace) do
+        failure_response(%{"error" => %{"message" => "No workspace available for sub-agent execution."}})
+      else
+        result =
+          case provider do
+            :claude -> Subagent.run_claude(task, workspace)
+            :copilot -> Subagent.run_copilot(task, workspace)
+            :codex -> Subagent.run_codex(task, workspace)
+          end
+
+        case result do
+          {:ok, %{output: output, exit_code: 0}} ->
+            success_response(output)
+
+          {:ok, %{output: output, exit_code: code}} ->
+            dynamic_tool_response(false, "Sub-agent exited with code #{code}.\n\n#{output}")
+
+          {:error, reason} ->
+            failure_response(%{"error" => %{"message" => "Sub-agent failed: #{inspect(reason)}"}})
+        end
+      end
+    end
+  end
+
+  defp execute_openrouter_complete(arguments, _opts) do
+    prompt = get_string_arg(arguments, "prompt")
+    model = get_string_arg(arguments, "model")
+
+    if is_nil(prompt) or String.trim(prompt) == "" do
+      failure_response(%{"error" => %{"message" => "openrouter_complete requires a non-empty `prompt` string."}})
+    else
+      model_opts = if model, do: [model: model], else: []
+
+      case OpenRouter.complete(prompt, model_opts) do
+        {:ok, content} ->
+          success_response(content)
+
+        {:error, reason} ->
+          failure_response(%{"error" => %{"message" => "OpenRouter completion failed: #{inspect(reason)}"}})
+      end
+    end
+  end
+
+  defp execute_check_quotas(_opts) do
+    openrouter_status =
+      case OpenRouter.check_quota() do
+        {:ok, data} -> %{"available" => true, "details" => data}
+        {:error, reason} -> %{"available" => false, "error" => inspect(reason)}
+      end
+
+    claude_available = System.find_executable("claude") != nil
+    copilot_available = System.find_executable("copilot") != nil
+
+    payload = %{
+      "openrouter" => openrouter_status,
+      "claude" => %{"available" => claude_available},
+      "copilot" => %{"available" => copilot_available},
+      "codex" => %{"available" => true}
+    }
+
+    success_response(encode_payload(payload))
+  end
+
+  defp resolve_workspace(arguments, opts) do
+    base_workspace = Keyword.get(opts, :workspace)
+    subdir = get_string_arg(arguments, "workspace_subdir")
+
+    cond do
+      is_nil(base_workspace) -> nil
+      is_nil(subdir) or String.trim(subdir) == "" -> base_workspace
+      true -> Path.join(base_workspace, subdir)
+    end
+  end
+
+  defp get_string_arg(arguments, key) when is_map(arguments) do
+    case Map.get(arguments, key) || Map.get(arguments, String.to_existing_atom(key)) do
+      value when is_binary(value) -> value
+      _ -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp get_string_arg(_arguments, _key), do: nil
+
+  defp success_response(output) when is_binary(output) do
+    dynamic_tool_response(true, output)
   end
 
   defp execute_linear_graphql(arguments, opts) do
